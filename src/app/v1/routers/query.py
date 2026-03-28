@@ -7,7 +7,7 @@ from src.app.common.logger import get_logger
 
 router=APIRouter()
 
-logger=get_logger
+logger=get_logger()
 
 @router.post("/query", response_model=QueryResponse, tags=["query"])
 def query_handbook(body: QueryRequest) -> QueryResponse:

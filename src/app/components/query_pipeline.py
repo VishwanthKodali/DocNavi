@@ -32,7 +32,22 @@ from src.app.common.logger import get_logger
 logger = get_logger("components.query_pipeline")
 
 
-# ── State schema ─────────────────────────────────────────────────────────────
+# ── Cross-encoder singleton ───────────────────────────────────────────────────
+
+_cross_encoder = None
+
+def _get_cross_encoder():
+    """Load cross-encoder once and reuse across all queries."""
+    global _cross_encoder
+    if _cross_encoder is None:
+        from sentence_transformers import CrossEncoder
+        logger.info("Loading cross-encoder model (first time)...")
+        _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        logger.info("Cross-encoder loaded.")
+    return _cross_encoder
+
+
+# ── State schema ──────────────────────────────────────────────────────────────
 
 class QueryState(TypedDict):
     query: str
@@ -103,9 +118,10 @@ def node_dense_retriever(state: QueryState) -> dict:
     """LangGraph node: Qdrant cosine similarity search."""
     client = get_qdrant_client()
     vector = embed_single(state["expanded_query"])
-    results = client.search(
+
+    response = client.query_points(
         collection_name=settings.collection_text,
-        query_vector=vector,
+        query=vector,
         limit=settings.dense_top_k,
         with_payload=True,
         with_vectors=False,
@@ -119,7 +135,7 @@ def node_dense_retriever(state: QueryState) -> dict:
             "rank": idx + 1,
             "source": "dense",
         }
-        for idx, r in enumerate(results)
+        for idx, r in enumerate(response.points)
     ]
     logger.debug("Dense retriever: %d results", len(dense))
     return {"dense_results": dense}
@@ -133,7 +149,6 @@ def node_sparse_retriever(state: QueryState) -> dict:
         return {"sparse_results": []}
 
     results = bm25.query(state["expanded_query"], top_k=settings.sparse_top_k)
-    # Fetch Qdrant payloads for matched chunk_ids
     client = get_qdrant_client()
     enriched: list[dict] = []
     for r in results:
@@ -187,12 +202,10 @@ def node_rrf_fusion(state: QueryState) -> dict:
 def node_reranker(state: QueryState) -> dict:
     """LangGraph node: cross-encoder reranking of top-K fused results."""
     try:
-        from sentence_transformers import CrossEncoder
-        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        model = _get_cross_encoder()  # ← reuse singleton, no re-download
         pairs = [(state["query"], item["text"]) for item in state["fused_results"]]
         ce_scores = model.predict(pairs).tolist()
 
-        # Apply section-proximity boost for cross-refs
         boosted: list[tuple[float, dict]] = []
         for score, item in zip(ce_scores, state["fused_results"]):
             cross_refs = item.get("payload", {}).get("cross_refs", [])
@@ -234,7 +247,6 @@ def node_augmentation_fetcher(state: QueryState) -> dict:
         payload = chunk.get("payload", {})
         extra: list[str] = []
 
-        # Fetch image description
         if chunk.get("has_image_ref") and payload.get("image_ref"):
             try:
                 pts = client.retrieve(
@@ -247,7 +259,6 @@ def node_augmentation_fetcher(state: QueryState) -> dict:
             except Exception as exc:
                 logger.debug("image_ref fetch failed: %s", exc)
 
-        # Fetch table rows
         if chunk.get("has_table_ref") and payload.get("table_ref"):
             try:
                 pts = client.retrieve(
@@ -260,7 +271,6 @@ def node_augmentation_fetcher(state: QueryState) -> dict:
             except Exception as exc:
                 logger.debug("table_ref fetch failed: %s", exc)
 
-        # Fetch cross-referenced sections (first level only)
         if chunk.get("has_cross_refs"):
             for ref_sec_id in (payload.get("cross_refs") or [])[:2]:
                 try:
@@ -381,7 +391,6 @@ def route_refs(state: QueryState) -> Literal["augmentation_fetcher", "pass_throu
 def build_query_graph() -> StateGraph:
     graph = StateGraph(QueryState)
 
-    # Register nodes
     graph.add_node("intent_router", node_intent_router)
     graph.add_node("direct_answer", node_direct_answer)
     graph.add_node("query_expansion", node_query_expansion)
@@ -396,10 +405,8 @@ def build_query_graph() -> StateGraph:
     graph.add_node("generator", node_generator)
     graph.add_node("citation_validator", node_citation_validator)
 
-    # Entry
     graph.set_entry_point("intent_router")
 
-    # Conditional: intent router branch
     graph.add_conditional_edges(
         "intent_router",
         route_intent,
@@ -407,30 +414,24 @@ def build_query_graph() -> StateGraph:
     )
     graph.add_edge("direct_answer", END)
 
-    # Parallel retrieval fan-out
     graph.add_edge("query_expansion", "dense_retriever")
     graph.add_edge("query_expansion", "sparse_retriever")
 
-    # Fan-in to RRF
     graph.add_edge("dense_retriever", "rrf_fusion")
     graph.add_edge("sparse_retriever", "rrf_fusion")
 
-    # Linear: RRF → rerank → reference detect
     graph.add_edge("rrf_fusion", "reranker")
     graph.add_edge("reranker", "reference_detector")
 
-    # Conditional: augment or pass through
     graph.add_conditional_edges(
         "reference_detector",
         route_refs,
         {"augmentation_fetcher": "augmentation_fetcher", "pass_through": "pass_through"},
     )
 
-    # Both paths merge into context assembler
     graph.add_edge("augmentation_fetcher", "context_assembler")
     graph.add_edge("pass_through", "context_assembler")
 
-    # Final linear path
     graph.add_edge("context_assembler", "generator")
     graph.add_edge("generator", "citation_validator")
     graph.add_edge("citation_validator", END)

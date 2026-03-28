@@ -7,6 +7,7 @@ from src.app.components.bm25_index import get_bm25_index
 from src.app.common.settings import settings
 from src.app.common.logger import get_logger
 from src.app.v1.routers import ingestion,query,collection,health_check
+from src.app.components.query_pipeline import _get_cross_encoder
 
 logger = get_logger("API")
 
@@ -28,7 +29,14 @@ async def lifespan(app: FastAPI):
         logger.info("BM25 index loaded: %d documents", len(bm25.chunk_ids))
     except Exception:
         logger.warning("BM25 index not found on disk — run /ingest first.")
-
+    
+    try:
+        logger.info("Pre-loading cross-encoder model...")
+        _get_cross_encoder()
+        logger.info("Cross-encoder ready.")
+    except Exception as exc:
+        logger.warning("Cross-encoder pre-load failed: %s", exc)
+    
     logger.info("%s ready.", settings.app_name)
     yield
 
