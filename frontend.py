@@ -240,7 +240,7 @@ def _query(question: str) -> dict:
     payload = {
         "query": question,
     }
-    r = requests.post(f"{API}/query", json=payload, timeout=60)
+    r = requests.post(f"{API}/query", json=payload, timeout=120)
     r.raise_for_status()
     return r.json()
 
@@ -439,7 +439,7 @@ for msg in st.session_state.messages:
             meta = msg["meta"]
             sections = meta.get("cited_sections", [])
             pages = meta.get("page_refs", [])
-            confidence = meta.get("confidence", 0.0)
+            confidence = meta.get("confidence_score")
 
             if sections or pages:
                 st.markdown(
@@ -474,7 +474,7 @@ if prompt := st.chat_input("Ask about the NASA handbook…"):
                 meta = {
                     "cited_sections": result.get("cited_sections", []),
                     "page_refs": result.get("page_refs", []),
-                    "confidence": result.get("confidence", 0.0),
+                    "confidence": result.get("confidence_score"),
                 }
             except requests.exceptions.ConnectionError:
                 answer = (
@@ -491,7 +491,7 @@ if prompt := st.chat_input("Ask about the NASA handbook…"):
         if meta:
             sections = meta.get("cited_sections", [])
             pages = meta.get("page_refs", [])
-            confidence = meta.get("confidence", 0.0)
+            confidence = meta.get("confidence")
 
             if sections or pages:
                 st.markdown(
