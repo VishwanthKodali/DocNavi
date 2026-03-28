@@ -1,0 +1,47 @@
+# ── Build stage ────────────────────────────────────────────────────────────
+# Stage 1: Build dependencies
+FROM python:3.12-slim as builder
+
+RUN pip3 install --break-system-packages uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+
+# Create venv with copied Python (not symlinked)
+ENV UV_LINK_MODE=copy
+RUN uv venv
+RUN uv sync --frozen --no-dev
+
+# Stage 2: Runtime
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/.venv /app/.venv
+COPY . .
+
+# Create output directory for generated games
+RUN mkdir -p /app/output
+
+# Create entrypoint that activates venv
+RUN echo '#!/bin/bash\n\
+source /app/.venv/bin/activate\n\
+exec "$@"' > /entrypoint.sh && chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+# Expose both ports
+EXPOSE 8000 8501
+
+# Health-check against the FastAPI backend
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run both services via commands "python main.py & streamlit run frontend.py"
+CMD ["sh", "-c", "python main.py & streamlit run frontend.py --server.port 8501 --server.address 0.0.0.0"]
+
